@@ -10,14 +10,15 @@ It is designed for content creators and gamers that empowers users with Web3-nat
 
 ### 🌍 Ecosystem and Integrations
 
-- Integrates with **StarkNet** for blockchain scalability.
+- Integrates with **Stellar** for high-speed, low-cost transactions.
+- Supports **Freelancer**, **xBull**, **Albedo**, and **Lobstr** wallets.
 - Engages with **Worldcoin** for user identity verification.
 
 ## 🏗 Project Structure
 
 - **Frontend**: Built with React, Next.js (Web), Flutter (Mobile).
 - **Backend**: Node.js, FastAPI, GraphQL.
-- **Smart Contracts**: Cairo (StarkNet).
+- **Blockchain**: Stellar SDK & Soroban Smart Contracts.
 - **Storage**: IPFS/Filecoin integration for decentralized content storage.
 
 ## 🔧 Installation & Setup
@@ -35,6 +36,21 @@ npm install
 # Start the development server
 npm run dev
 ```
+
+## 🌐 Stellar Network Configuration
+
+StreamFi supports switching between Stellar Testnet and Mainnet through a centralized environment variable `NEXT_PUBLIC_STELLAR_NETWORK`.
+
+1. **Set the environment variable:**
+   Create a `.env.local` file (for local development) or configure your hosting environment with:
+   ```env
+   NEXT_PUBLIC_STELLAR_NETWORK=testnet
+   ```
+2. **Valid Values:**
+   - `"testnet"` (default): Uses `horizon-testnet.stellar.org`. Safe for local testing.
+   - `"mainnet"`: Uses `horizon.stellar.org`. Only for production.
+
+*Note: For safety, any invalid or missing value will automatically default to `testnet` and log a warning.*
 
 ## 🛠 Development Tools
 

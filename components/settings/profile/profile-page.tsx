@@ -1,10 +1,12 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 "use client";
 import { useEffect, useCallback, useState } from "react";
 import type React from "react";
 import { useAuth } from "@/components/auth/auth-provider";
 import { motion, AnimatePresence } from "framer-motion";
-import profileImage from "@/public/Images/profile.png";
-import Avatar from "@/public/icons/avatar.svg";
+// Remove direct image imports
+import { Avatar } from "@/public/icons";
+import { ProfileImage } from "@/public/Images";
 import VerificationPopup from "./popup";
 import AvatarSelectionModal from "./avatar-modal";
 import type {
@@ -30,12 +32,12 @@ export default function ProfileSettings() {
   const { showToast } = useToast();
 
   const [avatar, setAvatar] = useState<StaticImageData | string | File>(
-    profileImage
+    ProfileImage
   );
   const [socialLinks, setSocialLinks] = useState<SocialLink[]>([]);
 
-  const [usedPlatforms, setUsedPlatforms] = useState<Platform[]>([]);
-  const [isEmailVerified, setIsEmailVerified] = useState(false);
+  const [, setUsedPlatforms] = useState<Platform[]>([]);
+  const [, setIsEmailVerified] = useState(false);
   const [isInitialized, setIsInitialized] = useState(false);
 
   const [formState, setFormState] = useState<FormState>({
@@ -69,20 +71,32 @@ export default function ProfileSettings() {
   });
 
   const detectPlatformFromUrl = useCallback((url: string): Platform | null => {
-    if (!url) return null;
+    if (!url) {
+      return null;
+    }
 
     const domain = url.toLowerCase();
-    if (domain.includes("instagram")) return "instagram";
-    if (domain.includes("twitter") || domain.includes("x.com"))
+    if (domain.includes("instagram")) {
+      return "instagram";
+    }
+    if (domain.includes("twitter") || domain.includes("x.com")) {
       return "twitter";
-    if (domain.includes("facebook") || domain.includes("fb.com"))
+    }
+    if (domain.includes("facebook") || domain.includes("fb.com")) {
       return "facebook";
-    if (domain.includes("youtube") || domain.includes("youtu.be"))
+    }
+    if (domain.includes("youtube") || domain.includes("youtu.be")) {
       return "youtube";
-    if (domain.includes("telegram") || domain.includes("t.me"))
+    }
+    if (domain.includes("telegram") || domain.includes("t.me")) {
       return "telegram";
-    if (domain.includes("discord")) return "discord";
-    if (domain.includes("tiktok")) return "tiktok";
+    }
+    if (domain.includes("discord")) {
+      return "discord";
+    }
+    if (domain.includes("tiktok")) {
+      return "tiktok";
+    }
     return "other";
   }, []);
 
@@ -381,7 +395,7 @@ export default function ProfileSettings() {
 
       // Prepare avatar data if it's a File/Blob
       let avatarData: string | File | undefined;
-      if (typeof avatar === "string" && avatar !== profileImage.src) {
+      if (typeof avatar === "string") {
         avatarData = avatar;
       } else if (avatar instanceof File) {
         avatarData = avatar;

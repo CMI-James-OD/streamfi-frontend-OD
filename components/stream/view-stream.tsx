@@ -2,35 +2,36 @@
 "use client";
 
 import type React from "react";
-import { mockChatMessages } from "@/data/dashboard";
 import {
   ChevronRight,
   Edit3,
   Gift,
   Instagram,
-  Maximize,
-  Pause,
-  Play,
-  Settings,
+  MessageCircle,
+  Send,
   Share2,
   X,
   Twitter,
   Users,
-  Volume2,
-  VolumeX,
   Menu,
+  Flag,
 } from "lucide-react";
 import Image from "next/image";
+import { createPortal } from "react-dom";
 import { JSX, useEffect, useRef, useState } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import { useStellarWallet } from "@/contexts/stellar-wallet-context";
 import { FaDiscord, FaFacebook } from "react-icons/fa";
 import StreamInfoModal from "../dashboard/common/StreamInfoModal";
 import DashboardScreenGuard from "../explore/DashboardScreenGuard";
 import { Button } from "../ui/button";
 import ChatSection from "./chat-section";
-
-import { text } from "stream/consumers";
-import { Flag } from "lucide-react";
+import { ViewStreamSkeleton } from "../skeletons/ViewStreamSkeleton";
+import MuxPlayer from "@mux/mux-player-react";
 import ReportLiveStreamModal from "../modals/ReportLiveStreamModal";
+import { useChat } from "@/hooks/useChat";
+import { TipButton, TipModalContainer } from "@/components/tipping";
+import { useTipModal } from "@/hooks/useTipModal";
 
 const socialIcons: Record<string, JSX.Element> = {
   twitter: <Twitter className="h-4 w-4" />,
@@ -44,9 +45,10 @@ interface ViewStreamProps {
   isLive?: boolean;
   onStatusChange?: (isLive: boolean) => void;
   isOwner?: boolean;
+  userData?: any;
 }
 
-// Mock API function to fetch stream data
+// Mock API function to fetch stream data (fallback)
 const fetchStreamData = async () => {
   // Simulate API call delay
   await new Promise(resolve => setTimeout(resolve, 1000));
@@ -75,13 +77,15 @@ const fetchStreamData = async () => {
 // TippingModal component
 const TIPPING_CURRENCIES = [
   { label: "ETH", value: "ETH" },
-  { label: "STRK", value: "STRK" },
+  { label: "XLM", value: "XLM" },
   { label: "STRM", value: "STRM" },
   { label: "USDC", value: "USDC" },
 ];
 
 function formatAddress(address: string) {
-  if (!address) return "";
+  if (!address) {
+    return "";
+  }
   return address.slice(0, 5) + "...." + address.slice(-5);
 }
 
@@ -96,7 +100,7 @@ const TippingModal = ({
   username: string;
 }) => {
   const [amount, setAmount] = useState("");
-  const [currency, setCurrency] = useState("STRK");
+  const [currency, setCurrency] = useState("XLM");
   // Mock USD value for now
   const usdValue = amount && !isNaN(Number(amount)) ? (0).toFixed(2) : "0";
 
@@ -107,7 +111,9 @@ const TippingModal = ({
   const handleAmountChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     // Only allow numbers and decimals
     const val = e.target.value;
-    if (/^\d*\.?\d*$/.test(val)) setAmount(val);
+    if (/^\d*\.?\d*$/.test(val)) {
+      setAmount(val);
+    }
   };
 
   return isOpen ? (
@@ -123,7 +129,7 @@ const TippingModal = ({
         </button>
         <h2 className="text-2xl font-bold text-center mb-8">Tip to Creator</h2>
         <div className="mb-6 flex justify-center gap-8 items-center">
-          <span className="text-gray-400 text-sm mb-1">Starknet address:</span>
+          <span className="text-gray-400 text-sm mb-1">Stellar address:</span>
           <span className="bg-[#18191C] px-4 py-2 rounded-lg font-mono text-base tracking-wider select-all">
             {formatAddress(creatorAddress)}
           </span>
@@ -183,39 +189,82 @@ const ViewStream = ({
   isLive: initialIsLive,
   onStatusChange,
   isOwner = false,
+  userData,
 }: ViewStreamProps) => {
   const [isLive, setIsLive] = useState(initialIsLive);
   const [streamData, setStreamData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [isPlaying, setIsPlaying] = useState(true);
-  const [isMuted, setIsMuted] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [fullscreenElement, setFullscreenElement] = useState<Element | null>(
+    null
+  );
   const [showChat, setShowChat] = useState(true);
-  const [chatMessages, setChatMessages] = useState(mockChatMessages);
+  const [showChatOverlay, setShowChatOverlay] = useState(true);
+  const [chatOverlayMessage, setChatOverlayMessage] = useState("");
   const [showStreamInfoModal, setShowStreamInfoModal] = useState(false);
-  const [volume, setVolume] = useState(80);
-  const [, setShowControls] = useState(false);
-  const [videoQuality, setVideoQuality] = useState("720p");
-  const [showQualityOptions, setShowQualityOptions] = useState(false);
   const [showTipModal, setShowTipModal] = useState(false);
   const [showReportModal, setShowReportModal] = useState(false);
 
+  // Use custom hooks for Stellar wallet and tip modal state
+  const { publicKey: stellarPublicKey, isConnected } = useStellarWallet();
+  const tipModalState = useTipModal();
+
   const videoContainerRef = useRef<HTMLDivElement>(null);
   const mainContentRef = useRef<HTMLDivElement>(null);
+  const overlayScrollRef = useRef<HTMLDivElement>(null);
+  const overlayInputRef = useRef<HTMLInputElement>(null);
+  const {
+    messages: chatMessages,
+    sendMessage,
+    isSending,
+  } = useChat(userData?.playbackId, stellarPublicKey, isLive);
 
-  // Fetch stream data on component mount
+  // Stable refs so the native keydown listener always reads current values
+  const chatOverlayMessageRef = useRef(chatOverlayMessage);
+  chatOverlayMessageRef.current = chatOverlayMessage;
+  const isSendingRef = useRef(isSending);
+  isSendingRef.current = isSending;
+
+  // Use userData from props if available, otherwise fetch it
   useEffect(() => {
     const getStreamData = async () => {
       try {
         setLoading(true);
-        const data = await fetchStreamData();
-        setStreamData(data);
 
-        // Update live status
-        setIsLive(data.isLive);
-        if (onStatusChange) {
-          onStatusChange(data.isLive);
+        if (userData) {
+          // Use data from props
+          const data = {
+            isLive: initialIsLive || false,
+            title: userData.streamTitle || `${username}'s Live Stream`,
+            tags: userData.tags || ["live", "streaming"],
+            viewCount: userData.viewCount || 0,
+            duration: "00:00:00", // Live streams don't have duration
+            thumbnailUrl: userData.avatar || "/Images/user.png",
+            avatarUrl: userData.avatar || "/Images/user.png",
+            followers: userData.followers?.length || 0,
+            bio: userData.bio || `Welcome to ${username}'s stream!`,
+            socialLinks: userData.socialLinks || {
+              twitter: "",
+              instagram: "",
+              discord: "",
+            },
+            stellarAddress: userData.stellarAddress || "",
+          };
+
+          setStreamData(data);
+          setIsLive(data.isLive);
+          if (onStatusChange) {
+            onStatusChange(data.isLive);
+          }
+        } else {
+          // Fallback to API call if no userData provided
+          const data = await fetchStreamData();
+          setStreamData(data);
+          setIsLive(data.isLive);
+          if (onStatusChange) {
+            onStatusChange(data.isLive);
+          }
         }
       } catch (err) {
         setError("Failed to load stream data");
@@ -226,50 +275,75 @@ const ViewStream = ({
     };
 
     getStreamData();
-  }, [username, onStatusChange]);
-
-  // Handle fullscreen toggle
-  const toggleFullscreen = () => {
-    if (!videoContainerRef.current) return;
-
-    if (!document.fullscreenElement) {
-      videoContainerRef.current.requestFullscreen().catch(err => {
-        console.error(`Error attempting to enable fullscreen: ${err.message}`);
-      });
-      setIsFullscreen(true);
-    } else {
-      document.exitFullscreen();
-      setIsFullscreen(false);
-    }
-  };
+  }, [username, onStatusChange, userData, initialIsLive]);
 
   // Handle fullscreen change event
   useEffect(() => {
     const handleFullscreenChange = () => {
-      setIsFullscreen(!!document.fullscreenElement);
+      const fsEl = document.fullscreenElement;
+      setIsFullscreen(!!fsEl);
+      setFullscreenElement(fsEl);
+      if (fsEl) {
+        setShowChatOverlay(true);
+      }
     };
 
     document.addEventListener("fullscreenchange", handleFullscreenChange);
+    document.addEventListener("webkitfullscreenchange", handleFullscreenChange);
     return () => {
       document.removeEventListener("fullscreenchange", handleFullscreenChange);
+      document.removeEventListener(
+        "webkitfullscreenchange",
+        handleFullscreenChange
+      );
     };
   }, []);
+
+  // Auto-scroll overlay chat when new messages arrive
+  useEffect(() => {
+    if (overlayScrollRef.current) {
+      overlayScrollRef.current.scrollTop =
+        overlayScrollRef.current.scrollHeight;
+    }
+  }, [chatMessages]);
+
+  // Native keydown listener: stops the event from reaching Mux Player's native
+  // keyboard handler before it can call preventDefault on space (play/pause).
+  // React's synthetic onKeyDown runs too late for this. Enter is also handled
+  // here since stopPropagation prevents the React handler from firing.
+  useEffect(() => {
+    const input = overlayInputRef.current;
+    if (!input) {
+      return;
+    }
+
+    const handler = (e: KeyboardEvent) => {
+      e.stopPropagation();
+      if (
+        e.key === "Enter" &&
+        !isSendingRef.current &&
+        chatOverlayMessageRef.current.trim()
+      ) {
+        sendMessage(chatOverlayMessageRef.current);
+        setChatOverlayMessage("");
+      }
+    };
+
+    input.addEventListener("keydown", handler);
+    return () => input.removeEventListener("keydown", handler);
+  }, [isFullscreen, showChatOverlay, sendMessage]);
+
+  const handleOverlaySendMessage = () => {
+    if (!chatOverlayMessage.trim() || isSending) {
+      return;
+    }
+    sendMessage(chatOverlayMessage);
+    setChatOverlayMessage("");
+  };
 
   // Handle chat toggle
   const toggleChat = () => {
     setShowChat(!showChat);
-  };
-
-  // Handle sending a chat message
-  const handleSendMessage = (message: string) => {
-    const newMessage = {
-      id: chatMessages.length + 1,
-      username: "You",
-      message: message,
-      color: "#9333ea",
-    };
-
-    setChatMessages([...chatMessages, newMessage]);
   };
 
   // Handle stream info save
@@ -283,35 +357,8 @@ const ViewStream = ({
     setShowStreamInfoModal(false);
   };
 
-  // Handle volume change
-  const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const newVolume = Number.parseInt(e.target.value);
-    setVolume(newVolume);
-    setIsMuted(newVolume === 0);
-  };
-
-  // Toggle mute
-  const toggleMute = () => {
-    if (isMuted) {
-      setIsMuted(false);
-      setVolume(volume === 0 ? 80 : volume); // Restore previous volume if it was 0
-    } else {
-      setIsMuted(true);
-    }
-  };
-
-  // Handle video quality change
-  const changeQuality = (quality: string) => {
-    setVideoQuality(quality);
-    setShowQualityOptions(false);
-  };
-
   if (loading) {
-    return (
-      <div className="flex items-center justify-center h-full min-h-[400px] bg-[#17191A]">
-        <div className="text-white">Loading stream...</div>
-      </div>
-    );
+    return <ViewStreamSkeleton />;
   }
 
   if (error || !streamData) {
@@ -341,21 +388,29 @@ const ViewStream = ({
               <div
                 className={`relative ${isFullscreen ? "flex-1" : "w-full h-full"}`}
               >
-                {isLive ? (
-                  <div className="absolute inset-0 flex items-center justify-center">
-                    <div className="text-white text-center">
-                      <div className="bg-red-600 text-white text-xs px-2 py-1 rounded-sm inline-block mb-4">
-                        Live
-                      </div>
-                      <p className="text-lg">Live Stream Content</p>
-                    </div>
-                  </div>
+                {isLive && userData?.playbackId ? (
+                  <MuxPlayer
+                    playbackId={userData.playbackId}
+                    streamType="ll-live:dvr"
+                    autoPlay="muted"
+                    metadata={{
+                      video_id: userData.playbackId,
+                      video_title: streamData.title || `${username}'s Stream`,
+                      viewer_user_id: "anonymous",
+                    }}
+                    primaryColor="#ac39f2"
+                    className="w-full h-full"
+                  />
                 ) : (
                   <div className="absolute inset-0 flex items-center justify-center bg-gray-900">
                     <div className="text-white text-center">
-                      <p className="text-lg mb-2">Stream is offline</p>
+                      <p className="text-lg mb-2">
+                        {isLive ? "Loading stream..." : "Stream is offline"}
+                      </p>
                       <p className="text-sm text-gray-400">
-                        Check back later or browse past streams below
+                        {isLive
+                          ? "Please wait while we load the stream"
+                          : "Check back later or browse past streams below"}
                       </p>
                     </div>
                   </div>
@@ -386,130 +441,136 @@ const ViewStream = ({
                     </div>
                   </div>
                 )}
+              </div>
+            </div>
 
-                {isFullscreen && !showChat && (
-                  <div className="absolute right-0 top-3 z-30 text-white cursor-pointer transition-colors hover:text-gray-300">
-                    <ChevronRight onClick={toggleChat} />
-                  </div>
-                )}
+            {/* Transparent overlay chat portaled into fullscreen element */}
+            {isFullscreen &&
+              fullscreenElement &&
+              createPortal(
+                <AnimatePresence>
+                  {showChatOverlay ? (
+                    <motion.div
+                      key="chat-overlay"
+                      initial={{ x: 400, opacity: 0 }}
+                      animate={{ x: 0, opacity: 1 }}
+                      exit={{ x: 400, opacity: 0 }}
+                      transition={{
+                        type: "spring",
+                        damping: 30,
+                        stiffness: 300,
+                      }}
+                      className="absolute right-4 top-4 bottom-20 w-80 flex flex-col pointer-events-auto z-[100]"
+                      style={{ maxHeight: "calc(100vh - 8rem)" }}
+                    >
+                      <div className="flex flex-col h-full bg-gradient-to-b from-black/40 via-black/30 to-black/40 backdrop-blur-sm rounded-lg overflow-hidden">
+                        {/* Header */}
+                        <div className="flex items-center justify-between p-3 bg-black/50 backdrop-blur-md border-b border-white/10">
+                          <div className="flex items-center gap-2">
+                            <MessageCircle size={16} className="text-white" />
+                            <span className="text-white font-semibold text-sm">
+                              Live Chat
+                            </span>
+                          </div>
+                          <button
+                            onClick={() => setShowChatOverlay(false)}
+                            className="p-1 hover:bg-white/20 rounded transition-colors"
+                          >
+                            <X size={16} className="text-white" />
+                          </button>
+                        </div>
 
-                {/* Video controls */}
-                <div
-                  className="absolute bottom-0 left-0 right-0 flex flex-col p-4 bg-gradient-to-t from-black/80 to-transparent opacity-100 group-hover:opacity-100 transition-opacity"
-                  onMouseEnter={() => setShowControls(true)}
-                  onMouseLeave={() => setShowControls(false)}
-                >
-                  {/* Progress bar */}
-                  <div className="w-full bg-gray-600 h-0.5 rounded-full overflow-hidden mb-4">
-                    <div className="bg-white h-full w-1/2"></div>
-                  </div>
-
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center space-x-4">
-                      <button
-                        className="text-white"
-                        onClick={() => setIsPlaying(!isPlaying)}
-                        aria-label={isPlaying ? "Pause" : "Play"}
-                      >
-                        {isPlaying ? (
-                          <Pause className="h-5 w-5" />
-                        ) : (
-                          <Play className="h-5 w-5" />
-                        )}
-                      </button>
-
-                      <div className="flex items-center space-x-2 group/volume">
-                        <button
-                          className="text-white"
-                          onClick={toggleMute}
-                          aria-label={isMuted ? "Unmute" : "Mute"}
+                        {/* Messages */}
+                        <div
+                          ref={overlayScrollRef}
+                          className="flex-1 overflow-y-auto p-3 space-y-2 scrollbar-thin scrollbar-thumb-white/20 scrollbar-track-transparent"
                         >
-                          {isMuted || volume === 0 ? (
-                            <VolumeX className="h-5 w-5" />
+                          <div className="text-xs text-white/60 text-center py-2">
+                            Welcome to live chat!
+                          </div>
+                          <div className="flex flex-col gap-2">
+                            {chatMessages.map(msg => (
+                              <div
+                                key={msg.id}
+                                className={`bg-black/30 backdrop-blur-sm rounded-lg p-2 ${msg.isPending ? "opacity-50" : ""}`}
+                              >
+                                <div className="flex items-start gap-2">
+                                  <div
+                                    className="w-6 h-6 rounded-full flex-shrink-0 flex items-center justify-center text-xs text-white font-semibold"
+                                    style={{ backgroundColor: msg.color }}
+                                  >
+                                    {msg.username.charAt(0).toUpperCase()}
+                                  </div>
+                                  <div className="flex-1 min-w-0">
+                                    <span
+                                      className="text-xs font-semibold"
+                                      style={{ color: msg.color }}
+                                    >
+                                      {msg.username}
+                                    </span>
+                                    <p className="text-white text-sm break-words">
+                                      {msg.message}
+                                    </p>
+                                  </div>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+
+                        {/* Input */}
+                        <div className="p-3 bg-black/50 backdrop-blur-md border-t border-white/10">
+                          {isConnected ? (
+                            <div className="flex items-center gap-2">
+                              <input
+                                ref={overlayInputRef}
+                                type="text"
+                                value={chatOverlayMessage}
+                                onChange={e =>
+                                  setChatOverlayMessage(e.target.value)
+                                }
+                                placeholder="Say something..."
+                                disabled={isSending}
+                                autoComplete="off"
+                                autoCorrect="off"
+                                autoCapitalize="off"
+                                spellCheck={false}
+                                className="flex-1 bg-white/10 text-white text-sm px-3 py-2 rounded-lg border border-white/20 focus:border-purple-500 focus:bg-white/15 focus:outline-none placeholder-white/50 disabled:opacity-50"
+                              />
+                              <button
+                                onClick={handleOverlaySendMessage}
+                                disabled={
+                                  !chatOverlayMessage.trim() || isSending
+                                }
+                                className="bg-purple-600 hover:bg-purple-700 disabled:bg-purple-600/50 disabled:cursor-not-allowed text-white p-2 rounded-lg transition-colors"
+                              >
+                                <Send size={16} />
+                              </button>
+                            </div>
                           ) : (
-                            <Volume2 className="h-5 w-5" />
+                            <p className="text-white/50 text-xs text-center">
+                              Connect wallet to chat
+                            </p>
                           )}
-                        </button>
-                        <div className="w-0 overflow-hidden group-hover/volume:w-20 transition-all duration-300">
-                          <input
-                            type="range"
-                            min="0"
-                            max="100"
-                            value={isMuted ? 0 : volume}
-                            onChange={handleVolumeChange}
-                            className="w-full accent-white"
-                          />
                         </div>
                       </div>
-                    </div>
-                    <span className="text-white text-xs">
-                      {streamData.duration}
-                    </span>
-
-                    <div className="flex items-center space-x-3">
-                      {/* Quality selector */}
-                      <div className="relative">
-                        <button
-                          className="text-white flex items-center space-x-1"
-                          onClick={() =>
-                            setShowQualityOptions(!showQualityOptions)
-                          }
-                          aria-label="Video quality"
-                        >
-                          <Settings className="h-4 w-4" />
-                          <span className="text-xs">{videoQuality}</span>
-                        </button>
-
-                        {showQualityOptions && (
-                          <div className="absolute bottom-full right-0 mb-2 bg-black/90 rounded-md overflow-hidden">
-                            {["1080p", "720p", "480p", "360p", "Auto"].map(
-                              quality => (
-                                <button
-                                  key={quality}
-                                  className={`block w-full text-left px-4 py-2 text-xs ${
-                                    videoQuality === quality
-                                      ? "bg-gray-700 text-white"
-                                      : "text-gray-300 hover:bg-gray-800"
-                                  }`}
-                                  onClick={() => changeQuality(quality)}
-                                >
-                                  {quality}
-                                </button>
-                              )
-                            )}
-                          </div>
-                        )}
-                      </div>
-
-                      <button
-                        className="text-white"
-                        onClick={toggleFullscreen}
-                        aria-label={
-                          isFullscreen ? "Exit fullscreen" : "Enter fullscreen"
-                        }
-                      >
-                        <Maximize className="h-4 w-4" />
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Fullscreen chat - now sits beside the video */}
-              {isFullscreen && showChat && (
-                <div className="border border-border w-[350px] flex-shrink-0 bg-black border-l border-gray-">
-                  <ChatSection
-                    messages={chatMessages}
-                    onSendMessage={handleSendMessage}
-                    isCollapsible={true}
-                    isFullscreen={true}
-                    className="h-full"
-                    onToggleChat={toggleChat}
-                    showChat={showChat}
-                  />
-                </div>
+                    </motion.div>
+                  ) : (
+                    <motion.button
+                      key="chat-toggle"
+                      initial={{ x: 100, opacity: 0 }}
+                      animate={{ x: 0, opacity: 1 }}
+                      exit={{ x: 100, opacity: 0 }}
+                      onClick={() => setShowChatOverlay(true)}
+                      className="absolute right-4 top-20 bg-black/70 backdrop-blur-md text-white px-4 py-2 rounded-lg border border-white/20 hover:bg-black/80 transition-all z-[100] flex items-center gap-2"
+                    >
+                      <MessageCircle size={16} />
+                      <span className="text-sm font-semibold">Chat</span>
+                    </motion.button>
+                  )}
+                </AnimatePresence>,
+                fullscreenElement
               )}
-            </div>
 
             {/* Stream info - only show when not in fullscreen */}
             {!isFullscreen && (
@@ -560,13 +621,29 @@ const ViewStream = ({
                             >
                               Follow
                             </Button>
-                            <Button
-                              variant="outline"
-                              className="bg-[#2D2F31] hover:bg-[#3D3F41] text-white border-gray-600"
-                            >
-                              <Gift className="h-4 w-4 mr-2" />
-                              Gift
-                            </Button>
+                            {/* Stellar Tip Button */}
+                            {streamData.starknetAddress && stellarPublicKey && stellarPublicKey !== streamData.starknetAddress ? (
+                              <TipButton
+                                recipientUsername={username}
+                                recipientPublicKey={streamData.starknetAddress}
+                                onTipClick={tipModalState.openTipModal}
+                                variant="outline"
+                                className="bg-[#2D2F31] hover:bg-[#3D3F41] text-white border-gray-600"
+                              >
+                                <Gift className="h-4 w-4 mr-2" />
+                                Send Tip
+                              </TipButton>
+                            ) : (
+                              <Button
+                                variant="outline"
+                                className="bg-[#2D2F31] hover:bg-[#3D3F41] text-white border-gray-600"
+                                disabled
+                                title={!stellarPublicKey ? "Connect Stellar wallet to tip" : !streamData.starknetAddress ? "Streamer hasn't set up Stellar wallet" : "Cannot tip yourself"}
+                              >
+                                <Gift className="h-4 w-4 mr-2" />
+                                Send Tip
+                              </Button>
+                            )}
                             <Button
                               variant="outline"
                               className="p-0 w-7 h- border-none focus:ring-0 focus:ring-offset-0 "
@@ -668,12 +745,14 @@ const ViewStream = ({
             >
               <ChatSection
                 messages={chatMessages}
-                onSendMessage={handleSendMessage}
+                onSendMessage={sendMessage}
                 isCollapsible={true}
                 isFullscreen={false}
                 className="border border-border h-full border-l"
                 onToggleChat={toggleChat}
                 showChat={showChat}
+                isWalletConnected={isConnected}
+                isSending={isSending}
               />
             </div>
           )}
@@ -689,21 +768,6 @@ const ViewStream = ({
             </button>
           )}
         </div>
-
-        {/* Stream Info Modal */}
-        {showStreamInfoModal && (
-          <StreamInfoModal
-            initialData={{
-              title: streamData.title,
-              description: streamData.bio,
-              category: "Gaming",
-              tags: streamData.tags,
-              thumbnail: streamData.thumbnailUrl,
-            }}
-            onClose={() => setShowStreamInfoModal(false)}
-            onSave={handleSaveStreamInfo}
-          />
-        )}
       </div>
 
       {/* Stream Info Modal */}
@@ -727,7 +791,7 @@ const ViewStream = ({
           isOpen={showTipModal}
           onClose={() => setShowTipModal(false)}
           creatorAddress={
-            streamData.starknetAddress ||
+            streamData.stellarAddress ||
             "0x5sddf6c7df6c7df6c7df6c7df6c7df6c7df6c7df6c"
           }
           username={username}
@@ -740,8 +804,24 @@ const ViewStream = ({
         onClose={() => setShowReportModal(false)}
         username={username}
       />
+
+      {/* Stellar Tip Modals */}
+      <TipModalContainer
+        isModalOpen={tipModalState.showTipModal}
+        onModalClose={tipModalState.closeTipModal}
+        recipientUsername={username}
+        recipientPublicKey={streamData?.starknetAddress || ""}
+        recipientAvatar={streamData?.avatarUrl}
+        senderPublicKey={stellarPublicKey}
+        onSuccess={tipModalState.showSuccess}
+        onError={tipModalState.showError}
+        confirmationState={tipModalState.tipConfirmation}
+        onConfirmationClose={tipModalState.closeConfirmation}
+        onRetry={tipModalState.retryFromConfirmation}
+      />
     </DashboardScreenGuard>
   );
 };
 
 export default ViewStream;
+

@@ -1,14 +1,21 @@
-"use client"
+"use client";
 
-import { createContext, useContext, useEffect, useState, type ReactNode, useCallback } from "react"
-import { useRouter, usePathname } from "next/navigation"
-import { useAccount, useDisconnect, useConnect } from "@starknet-react/core"
-import SimpleLoader from "@/components/ui/loader/simple-loader"
-import { User, UserUpdateInput } from "@/types/user"
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useState,
+  type ReactNode,
+  useCallback,
+  useRef,
+} from "react";
+import { useRouter } from "next/navigation";
+import { useStellarWallet } from "@/contexts/stellar-wallet-context";
+import type { User, UserUpdateInput } from "@/types/user";
+import { useUserProfile } from "@/hooks/useUserProfile";
 
-// Session timeout in milliseconds (24 hours)
 const SESSION_TIMEOUT = 24 * 60 * 60 * 1000;
-const SESSION_REFRESH_INTERVAL = 30 * 60 * 1000; // Refresh every 30 minutes
+const SESSION_REFRESH_INTERVAL = 30 * 60 * 1000;
 
 type AuthContextType = {
   user: User | null;
@@ -35,291 +42,178 @@ const AuthContext = createContext<AuthContextType>({
 export const useAuth = () => useContext(AuthContext);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<User | null>(null)
-  const [isLoading, setIsLoading] = useState(false)
-  const [isInitializing, setIsInitializing] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-  const [isWalletConnecting, setIsWalletConnecting] = useState(false)
-  const [hasInitialized, setHasInitialized] = useState(false)
+  const [localUser, setLocalUser] = useState<User | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [isWalletConnecting, setIsWalletConnecting] = useState(false);
+  const [isInitializing, setIsInitializing] = useState(true);
+  const [hasInitialized, setHasInitialized] = useState(false);
+  const mountTime = useRef(Date.now());
 
-  const router = useRouter()
-  const pathname = usePathname()
-  const { address, isConnected, status } = useAccount()
-  const { disconnect } = useDisconnect()
-  const { connectors } = useConnect()
+  const router = useRouter();
+  const { address, isConnected, disconnect, isLoading: isStellarLoading } =
+    useStellarWallet();
 
-  // Wallet connection persistence
-  const WALLET_CONNECTION_KEY = "starknet_last_wallet";
-  const WALLET_AUTO_CONNECT_KEY = "starknet_auto_connect";
+  const {
+    user: swrUser,
+    isLoading: swrLoading,
+    mutate: mutateUser,
+  } = useUserProfile(address ?? undefined);
 
-  const isSessionValid = (timestamp: number) => {
-    return Date.now() - timestamp < SESSION_TIMEOUT;
-  };
+  const user = swrUser !== undefined ? (swrUser ?? null) : localUser;
+
+  const WALLET_CONNECTION_KEY = "stellar_last_wallet";
+  const WALLET_AUTO_CONNECT_KEY = "stellar_auto_connect";
 
   const setSessionCookies = (walletAddress: string) => {
     try {
       document.cookie = `wallet=${walletAddress}; path=/; max-age=${SESSION_TIMEOUT / 1000}; SameSite=Lax`;
       localStorage.setItem("wallet", walletAddress);
       sessionStorage.setItem("wallet", walletAddress);
-    } catch (error) {
-      console.error("[AuthProvider] Error setting session cookies:", error);
+    } catch (setError) {
+      console.error("[AuthProvider] Error setting session cookies:", setError);
     }
   };
 
   const clearSessionCookies = () => {
-    document.cookie = "wallet=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=Lax"
-    localStorage.removeItem("wallet")
-    sessionStorage.removeItem("wallet")
-    // Don't clear StarkNet auto-connect data - this breaks auto-connect
-    // localStorage.removeItem(WALLET_CONNECTION_KEY)
-    // localStorage.removeItem(WALLET_AUTO_CONNECT_KEY)
-  }
+    document.cookie =
+      "wallet=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=Lax";
+    localStorage.removeItem("wallet");
+    sessionStorage.removeItem("wallet");
+  };
 
-  const clearUserData = (walletAddress?: string) => {
+  const clearUserData = (walletAddress?: string | null) => {
     if (walletAddress) {
-      localStorage.removeItem(`user_${walletAddress}`)
-      localStorage.removeItem(`user_timestamp_${walletAddress}`)
+      localStorage.removeItem(`user_${walletAddress}`);
+      localStorage.removeItem(`user_timestamp_${walletAddress}`);
     }
-    sessionStorage.removeItem("userData")
-    clearSessionCookies()
-  }
+    sessionStorage.removeItem("userData");
+    clearSessionCookies();
+  };
 
   const clearAllData = () => {
-    // This is for logout - clear everything including auto-connect
-    document.cookie = "wallet=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=Lax"
-    localStorage.removeItem("wallet")
-    sessionStorage.removeItem("wallet")
-    localStorage.removeItem(WALLET_CONNECTION_KEY)
-    localStorage.removeItem(WALLET_AUTO_CONNECT_KEY)
-    sessionStorage.removeItem("userData")
-    sessionStorage.removeItem("username")
-  }
-
-  const storeWalletConnection = (walletId: string, walletAddress: string) => {
-    try {
-      localStorage.setItem(WALLET_CONNECTION_KEY, walletId);
-      localStorage.setItem(WALLET_AUTO_CONNECT_KEY, "true");
-      console.log(`[AuthProvider] Stored wallet connection: ${walletId}`);
-    } catch (error) {
-      console.error("[AuthProvider] Error storing wallet connection:", error);
-    }
+    document.cookie =
+      "wallet=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=Lax";
+    localStorage.removeItem("wallet");
+    sessionStorage.removeItem("wallet");
+    localStorage.removeItem(WALLET_CONNECTION_KEY);
+    localStorage.removeItem(WALLET_AUTO_CONNECT_KEY);
+    sessionStorage.removeItem("userData");
+    sessionStorage.removeItem("username");
   };
 
-  const fetchUserData = async (
-    walletAddress?: string
-  ): Promise<User | null> => {
-    if (!walletAddress) {
-      walletAddress =
-        address ||
-        localStorage.getItem("wallet") ||
-        sessionStorage.getItem("wallet") ||
-        undefined;
-      if (!walletAddress) return null;
+  useEffect(() => {
+    if (swrUser && address) {
+      setSessionCookies(address);
     }
-
-    try {
-      setError(null);
-      setIsLoading(true);
-
-      // Check cached user data
-      const cachedUserData = localStorage.getItem(`user_${walletAddress}`);
-      const cachedTimestamp = localStorage.getItem(
-        `user_timestamp_${walletAddress}`
-      );
-
-      if (cachedUserData && cachedTimestamp) {
-        const parsedUser = JSON.parse(cachedUserData);
-        const timestamp = Number.parseInt(cachedTimestamp);
-
-        if (isSessionValid(timestamp)) {
-          setUser(parsedUser);
-          setSessionCookies(walletAddress);
-          return parsedUser;
-        } else {
-          localStorage.removeItem(`user_${walletAddress}`)
-          localStorage.removeItem(`user_timestamp_${walletAddress}`)
-          clearUserData(walletAddress) // Use clearUserData instead of clearSessionCookies
-        }
-      }
-
-      const response = await fetch(`/api/users/wallet/${walletAddress}`, {
-        headers: {
-          "x-wallet-address": walletAddress,
-        },
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-
-        // Cache user data
-        // localStorage.setItem(`user_${walletAddress}`, JSON.stringify(data.user))
-        localStorage.setItem(
-          `user_timestamp_${walletAddress}`,
-          Date.now().toString()
-        );
-
-        // Store in sessionStorage for immediate access
-        // sessionStorage.setItem("userData", JSON.stringify(data.user))
-
-        setSessionCookies(walletAddress);
-        return data.user;
-      } else if (response.status === 404) {
-        setUser(null);
-        return null;
-      } else {
-        throw new Error(`Failed to fetch user data: ${response.statusText}`);
-      }
-    } catch (err) {
-      console.error("Error fetching user data:", err);
-      setError("Failed to load user data");
-      setUser(null);
-      return null;
-    } finally {
-      setIsLoading(false);
-    }
-  };
+  }, [swrUser, address]);
 
   const logout = () => {
-    // Disconnect wallet
-    disconnect();
-
-    // Clear user state
-    setUser(null);
-
-    // Clear all data including auto-connect (user explicitly logged out)
-    clearAllData()
-    sessionStorage.removeItem("username")
-
-    // Navigate to home
+    void disconnect();
+    setLocalUser(null);
+    clearAllData();
+    sessionStorage.removeItem("username");
     router.push("/");
   };
 
-  // Handle wallet connection changes
   useEffect(() => {
-    const handleWalletChange = async () => {
-      if (status === "connecting") {
-        setIsWalletConnecting(true);
-        return;
-      }
+    if (isStellarLoading) {
+      setIsWalletConnecting(true);
+      return;
+    }
 
-      setIsWalletConnecting(false);
+    setIsWalletConnecting(false);
 
-      if (isConnected && address) {
-        // Store the address for auto-connect - let StarkNet handle connector detection
-        localStorage.setItem("starknet_last_wallet", "auto")
-        localStorage.setItem("starknet_auto_connect", "true")
+    if (isConnected && address) {
+      localStorage.setItem(WALLET_AUTO_CONNECT_KEY, "true");
+      setSessionCookies(address);
+    } else if (!isConnected) {
+      setLocalUser(null);
+      clearUserData(address ?? undefined);
+    }
+  }, [isConnected, address, isStellarLoading]);
 
-        setSessionCookies(address);
-
-        try {
-          const userData = await fetchUserData(address);
-          if (userData) {
-            setUser(userData)
-          }
-        } catch (error) {
-          console.error("[AuthProvider] Error fetching user data:", error);
-        }
-      } else if (status === "disconnected") {
-        setUser(null)
-        clearUserData(address)
-      }
-    };
-
-    handleWalletChange();
-  }, [isConnected, address, status, connectors]);
-
-  // Initialize auth on app start
   useEffect(() => {
-    const initAuth = async () => {
+    const initAuth = () => {
       try {
-        // Check if auto-connect is enabled
         const shouldAutoConnect =
           localStorage.getItem(WALLET_AUTO_CONNECT_KEY) === "true";
         const lastWalletId = localStorage.getItem(WALLET_CONNECTION_KEY);
 
-        // If wallet is already connected (due to StarkNet auto-connect), fetch user data
-        if (isConnected && address) {
-          await fetchUserData(address)
-        } else if (shouldAutoConnect && lastWalletId) {
-          // If auto-connect is enabled but wallet isn't connected yet, wait a bit longer
-          return
-        }
-      } catch (err) {
-        console.error("[AuthProvider] Error initializing authentication:", err);
-        setError("Failed to initialize authentication");
-      } finally {
-        // Only set initializing to false if we're not waiting for auto-connect
-        const shouldAutoConnect = localStorage.getItem(WALLET_AUTO_CONNECT_KEY) === "true"
-        const lastWalletId = localStorage.getItem(WALLET_CONNECTION_KEY)
-        
         if (!shouldAutoConnect || !lastWalletId || isConnected) {
-          setIsInitializing(false)
-          setHasInitialized(true)
+          setIsInitializing(false);
+          setHasInitialized(true);
         }
+      } catch (authError) {
+        console.error("[AuthProvider] Error initializing authentication:", authError);
+        setError("Failed to initialize authentication");
+        setIsInitializing(false);
+        setHasInitialized(true);
       }
     };
 
-    // Add a delay to ensure StarkNet provider is ready
-    const timer = setTimeout(initAuth, 500)
-    return () => clearTimeout(timer)
-  }, [])
+    const timer = setTimeout(initAuth, 500);
+    return () => clearTimeout(timer);
+  }, [isConnected]);
 
-  // Add a timeout to prevent infinite loading
   useEffect(() => {
-    const shouldAutoConnect = localStorage.getItem(WALLET_AUTO_CONNECT_KEY) === "true"
-    const lastWalletId = localStorage.getItem(WALLET_CONNECTION_KEY)
-    
+    const shouldAutoConnect =
+      localStorage.getItem(WALLET_AUTO_CONNECT_KEY) === "true";
+    const lastWalletId = localStorage.getItem(WALLET_CONNECTION_KEY);
+
     if (shouldAutoConnect && lastWalletId && isInitializing) {
-      // Set a timeout to prevent infinite loading (10 seconds)
       const timeout = setTimeout(() => {
-        console.log("[AuthProvider] ⏰ Auto-connect timeout - stopping loading")
-        setIsInitializing(false)
-        setHasInitialized(true)
-      }, 10000)
-      
-      return () => clearTimeout(timeout)
+        console.log("[AuthProvider] Auto-connect timeout - stopping loading");
+        setIsInitializing(false);
+        setHasInitialized(true);
+      }, 10000);
+
+      return () => clearTimeout(timeout);
     }
-  }, [isInitializing])
+  }, [isInitializing]);
 
-  // Handle auto-connect completion
   useEffect(() => {
-    if (hasInitialized) return
+    if (hasInitialized) {
+      return;
+    }
 
-    const shouldAutoConnect = localStorage.getItem(WALLET_AUTO_CONNECT_KEY) === "true"
-    const lastWalletId = localStorage.getItem(WALLET_CONNECTION_KEY)
+    const shouldAutoConnect =
+      localStorage.getItem(WALLET_AUTO_CONNECT_KEY) === "true";
+    const lastWalletId = localStorage.getItem(WALLET_CONNECTION_KEY);
 
-    // If auto-connect is enabled and we have a last wallet, wait for connection
     if (shouldAutoConnect && lastWalletId) {
       if (isConnected && address) {
-        setIsInitializing(false)
-        setHasInitialized(true)
-      } else if (status === "disconnected" && !isWalletConnecting) {
-        // Give auto-connect more time (up to 10 seconds)
-        const autoConnectStartTime = Date.now()
-        const maxAutoConnectTime = 10000 // 10 seconds
-        
-        if (autoConnectStartTime - window.performance.timing.navigationStart > maxAutoConnectTime) {
-          setIsInitializing(false)
-          setHasInitialized(true)
+        setIsInitializing(false);
+        setHasInitialized(true);
+      } else if (!isConnected && !isStellarLoading && !isWalletConnecting) {
+        const timeSinceMount = Date.now() - mountTime.current;
+        const maxAutoConnectTime = 10000;
+
+        if (timeSinceMount > maxAutoConnectTime) {
+          setIsInitializing(false);
+          setHasInitialized(true);
         }
       }
     } else if (!shouldAutoConnect || !lastWalletId) {
-      // If auto-connect is not enabled, finish initialization immediately
-      setIsInitializing(false)
-      setHasInitialized(true)
+      setIsInitializing(false);
+      setHasInitialized(true);
     }
 
-    // Emergency fallback: if we've been waiting too long, finish initialization
     if (isInitializing && !hasInitialized) {
-      const pageLoadTime = Date.now() - window.performance.timing.navigationStart
-      if (pageLoadTime > 15000) { // 15 seconds total
-        setIsInitializing(false)
-        setHasInitialized(true)
+      const timeSinceMount = Date.now() - mountTime.current;
+      if (timeSinceMount > 15000) {
+        setIsInitializing(false);
+        setHasInitialized(true);
       }
     }
-  }, [isConnected, address, status, isWalletConnecting, hasInitialized, connectors, isInitializing])
+  }, [
+    isConnected,
+    address,
+    isStellarLoading,
+    isWalletConnecting,
+    hasInitialized,
+    isInitializing,
+  ]);
 
-  // Refresh session periodically
   const refreshSession = useCallback(() => {
     const storedWallet = localStorage.getItem("wallet");
     const sessionWallet = sessionStorage.getItem("wallet");
@@ -337,7 +231,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, [user, isConnected, refreshSession]);
 
-  // Handle user activity for session refresh
   useEffect(() => {
     const handleUserActivity = () => {
       if (user && isConnected) {
@@ -345,7 +238,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
     };
 
-    const events = ["mousemove", "keydown", "click", "scroll"];
+    const events = [
+      "mousemove",
+      "keydown",
+      "click",
+      "scroll",
+      "visibilitychange",
+    ];
     events.forEach(event => {
       window.addEventListener(event, handleUserActivity);
     });
@@ -357,76 +256,62 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, [user, isConnected, refreshSession]);
 
-  // Track page visibility changes (reloads, tab switches, etc.)
-  useEffect(() => {
-    const handleVisibilityChange = () => {
-      console.log("[AuthProvider] 📄 Page visibility changed:", {
-        hidden: document.hidden,
-        timestamp: new Date().toISOString(),
-        walletState: {
-          isConnected,
-          address,
-          status,
-        },
-        storageState: {
-          localStorage: {
-            wallet: localStorage.getItem("wallet"),
-            starknet_last_wallet: localStorage.getItem("starknet_last_wallet"),
-            starknet_auto_connect: localStorage.getItem("starknet_auto_connect"),
-          },
-          sessionStorage: {
-            wallet: sessionStorage.getItem("wallet"),
-            userData: sessionStorage.getItem("userData") ? "exists" : "null",
-          }
-        }
-      })
-    }
-
-    const handleBeforeUnload = () => {
-      console.log("[AuthProvider] 🔄 Page unloading - wallet state:", {
-        isConnected,
-        address,
-        status,
-        timestamp: new Date().toISOString()
-      })
-    }
-
-    document.addEventListener("visibilitychange", handleVisibilityChange)
-    window.addEventListener("beforeunload", handleBeforeUnload)
-
-    return () => {
-      document.removeEventListener("visibilitychange", handleVisibilityChange)
-      window.removeEventListener("beforeunload", handleBeforeUnload)
-    }
-  }, [isConnected, address, status])
-
   return (
     <AuthContext.Provider
       value={{
         user,
-        isLoading,
+        isLoading: swrLoading,
         isInitializing,
         error,
         logout,
-        refreshUser: fetchUserData,
+        refreshUser: async () => {
+          const result = await mutateUser();
+          return result ?? null;
+        },
         updateUserProfile: async (userData: UserUpdateInput) => {
-          if (!user) return false
+          if (!user) {
+            return false;
+          }
 
           try {
-            const response = await fetch(`/api/users/update`, {
+            const formData = new FormData();
+
+            if (userData.username) {
+              formData.append("username", userData.username);
+            }
+            if (userData.email) {
+              formData.append("email", userData.email);
+            }
+            if (userData.bio) {
+              formData.append("bio", userData.bio);
+            }
+            if (userData.streamkey) {
+              formData.append("streamkey", userData.streamkey);
+            }
+            if (userData.avatar && userData.avatar instanceof File) {
+              formData.append("avatar", userData.avatar);
+            }
+            if (userData.socialLinks) {
+              formData.append(
+                "socialLinks",
+                JSON.stringify(userData.socialLinks)
+              );
+            }
+            if (userData.creator) {
+              formData.append("creator", JSON.stringify(userData.creator));
+            }
+
+            const response = await fetch(`/api/users/updates/${user.wallet}`, {
               method: "PUT",
-              headers: {
-                "Content-Type": "application/json",
-                "x-wallet-address": user.wallet,
-              },
-              body: JSON.stringify(userData),
-            })
+              body: formData,
+            });
 
             if (response.ok) {
-              const updatedUser = await response.json();
-              setUser(updatedUser);
+              const result = await response.json();
+              const updatedUser = result.user;
 
-              // Update cached data
+              await mutateUser(updatedUser, false);
+
               localStorage.setItem(
                 `user_${user.wallet}`,
                 JSON.stringify(updatedUser)
@@ -435,16 +320,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
                 `user_timestamp_${user.wallet}`,
                 Date.now().toString()
               );
-              // sessionStorage.setItem("userData", JSON.stringify(updatedUser))
 
               return true;
-            } else {
-              const errorData = await response.json();
-              console.error("Error response from API:", errorData);
-              return false;
             }
-          } catch (err) {
-            console.error("Error updating user profile:", err);
+
+            const responseError = await response.json();
+            console.error("Error response from API:", responseError);
+            return false;
+          } catch (updateError) {
+            console.error("Error updating user profile:", updateError);
             return false;
           }
         },
@@ -452,7 +336,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }}
     >
       {children}
-      {(isInitializing || isWalletConnecting) && <SimpleLoader />}
     </AuthContext.Provider>
   );
 }
